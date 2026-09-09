@@ -3,6 +3,10 @@ plugins {
     java
 }
 
+repositories {
+    mavenCentral()
+}
+
 group = "com.brook.tools"
 version = "1.0.0"
 
@@ -25,6 +29,17 @@ tasks.jar {
     }
 }
 
+dependencies {
+    implementation("net.java.dev.jna:jna:5.16.0")
+    implementation("net.java.dev.jna:jna-platform:5.16.0")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    useJUnitPlatform()
+}
+
 tasks.register<Jar>("fatJar") {
     archiveBaseName.set("brook-media-compress")
     archiveClassifier.set("")
@@ -34,5 +49,10 @@ tasks.register<Jar>("fatJar") {
         attributes["Main-Class"] = "com.brook.tools.mediacompress.Main"
     }
     from(sourceSets.main.get().output)
+    from({
+        configurations.runtimeClasspath.get()
+            .filter { it.name.endsWith("jar") }
+            .map { zipTree(it) }
+    })
     dependsOn(tasks.named("classes"))
 }

@@ -6,7 +6,6 @@ import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComponent;
-import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
@@ -21,7 +20,6 @@ import javax.swing.UIManager;
 import javax.swing.event.ChangeListener;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
-import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.Color;
 import java.awt.Container;
 import java.awt.Component;
@@ -45,6 +43,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Locale;
+import java.util.Optional;
 
 public final class MediaCompressFrame extends JFrame {
     /**
@@ -71,6 +70,7 @@ public final class MediaCompressFrame extends JFrame {
     private final JButton startButton = new JButton("Start");
     private final JButton stopButton = new JButton("Stop");
     private final FfmpegLocator locator = new FfmpegLocator();
+    private final FileDialogService fileDialogs = FileDialogs.create();
     private final Timer previewDebounceTimer;
 
     private JPanel dropPanel;
@@ -685,6 +685,12 @@ public final class MediaCompressFrame extends JFrame {
                     progressBar.setValue(100);
                 } catch (Exception ex) {
                     Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                    if (cause instanceof java.util.concurrent.CancellationException) {
+                        setProgressText("Stopped.");
+                        progressBar.setValue(0);
+                        progressBar.setString("Stopped.");
+                        return;
+                    }
                     showError(cause.getMessage());
                     progressBar.setValue(0);
                     progressBar.setString("");
@@ -698,11 +704,11 @@ public final class MediaCompressFrame extends JFrame {
         if (!busy) {
             return;
         }
+        if (activeCompressor != null) {
+            activeCompressor.requestCancel();
+        }
         if (compressWorker != null) {
             compressWorker.cancel(true);
-        }
-        if (activeCompressor != null) {
-            activeCompressor.cancelActiveEncode();
         }
     }
 
@@ -751,14 +757,8 @@ public final class MediaCompressFrame extends JFrame {
     }
 
     private void browse() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("Select media file");
-        chooser.setFileFilter(new FileNameExtensionFilter(
-                "Images, video, audio",
-                "png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm", "m4a", "mp3", "aac", "wav"));
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION && chooser.getSelectedFile() != null) {
-            selectFile(chooser.getSelectedFile().toPath());
-        }
+        fileDialogs.chooseOpenFile(this, "Select media file", FileTypeFilter.MEDIA)
+                .ifPresent(this::selectFile);
     }
 
     private long parseTargetBytes() {
@@ -780,17 +780,17 @@ public final class MediaCompressFrame extends JFrame {
     }
 
     private Path promptSaveOutput(Path tempOutput) {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("Save compressed file");
         Path defaultDir = UserPreferences.lastOutputDirectory(tempOutput);
-        chooser.setCurrentDirectory(defaultDir.toFile());
-        chooser.setSelectedFile(tempOutput.getFileName().toFile());
-        int result = chooser.showSaveDialog(this);
-        if (result != JFileChooser.APPROVE_OPTION || chooser.getSelectedFile() == null) {
+        Optional<Path> chosen = fileDialogs.chooseSaveFile(
+                this,
+                "Save compressed file",
+                defaultDir,
+                tempOutput.getFileName().toString());
+        if (chosen.isEmpty()) {
             return null;
         }
 
-        Path target = chooser.getSelectedFile().toPath();
+        Path target = chosen.get();
         try {
             moveOutput(tempOutput, target);
             UserPreferences.saveLastOutputDirectory(target);

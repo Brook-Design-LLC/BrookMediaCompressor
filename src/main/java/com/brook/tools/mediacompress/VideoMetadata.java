@@ -1,6 +1,9 @@
 package com.brook.tools.mediacompress;
 
 import java.nio.file.Path;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public record VideoMetadata(
         double durationSeconds,
@@ -8,9 +11,9 @@ public record VideoMetadata(
         int height,
         double sourceFps,
         boolean isHdr,
-        String colorTransfer, // 新增：如 arib-std-b67, smpte2084
-        String colorPrimaries, // 新增：如 bt2020
-        String colorSpace, // 新增：如 bt2020nc
+        String colorTransfer,
+        String colorPrimaries,
+        String colorSpace,
         int audioChannels,
         int sourceVideoKbps,
         int sourceAudioKbps) {
@@ -29,78 +32,32 @@ public record VideoMetadata(
         ProcessBuilder pb = new ProcessBuilder(
                 ffprobe.toString(),
                 "-v", "error",
-                "-show_entries", "format=duration",
-                "-show_entries",
-                "stream=codec_type,width,height,r_frame_rate,bit_rate,color_transfer,color_primaries,color_space,channels",
-                "-show_entries", "stream_tags=rotate",
-                "-show_entries", "stream_side_data=rotation",
-                "-of", "default=noprint_wrappers=1:nokey=0",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
                 input.toString());
         pb.redirectErrorStream(true);
         Process process = pb.start();
 
-        double duration = 0;
-        int width = 0;
-        int height = 0;
-        double sourceFps = 30.0;
-        boolean isHdr = false;
-        String colorTransfer = "unknown";
-        String colorPrimaries = "unknown";
-        String colorSpace = "unknown";
-        int audioChannels = 2;
-        int sourceVideoKbps = 0;
-        int sourceAudioKbps = 0;
-
-        boolean inVideo = false;
-        boolean inAudio = false;
-        int rotation = 0;
-
-        try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(process.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split("=", 2);
-                if (parts.length < 2)
-                    continue;
-
-                String key = parts[0].trim();
-                String val = parts[1].trim();
-
-                if ("codec_type".equals(key)) {
-                    inVideo = "video".equals(val);
-                    inAudio = "audio".equals(val);
-                } else if ("duration".equals(key)) {
-                    if (!"N/A".equalsIgnoreCase(val)) {
-                        duration = Double.parseDouble(val);
-                    }
-                } else if (inVideo) {
-                    switch (key) {
-                        case "width" -> width = Integer.parseInt(val);
-                        case "height" -> height = Integer.parseInt(val);
-                        case "rotate", "rotation" -> {
-                            try {
-                                rotation = (int) Math.round(Double.parseDouble(val));
-                            } catch (NumberFormatException ignored) {
-                            }
-                        }
-                        case "r_frame_rate" -> sourceFps = parseFps(val);
-                        case "color_transfer" -> {
-                            colorTransfer = val;
-                            isHdr = val.equalsIgnoreCase("smpte2084") || val.equalsIgnoreCase("arib-std-b67");
-                        }
-                        case "color_primaries" -> colorPrimaries = val;
-                        case "color_space" -> colorSpace = val;
-                        case "bit_rate" -> sourceVideoKbps = parseKbps(val);
-                    }
-                } else if (inAudio) {
-                    switch (key) {
-                        case "channels" -> audioChannels = Integer.parseInt(val);
-                        case "bit_rate" -> sourceAudioKbps = parseKbps(val);
-                    }
-                }
-            }
+        String json = new String(process.getInputStream().readAllBytes());
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new IllegalStateException("ffprobe failed with exit code " + exitCode);
         }
-        process.waitFor();
 
+        VideoMetadata meta = parseProbeJson(json);
+        logProbeResult(input, meta);
+        return meta;
+    }
+
+    static VideoMetadata parseProbeJson(String json) {
+        double duration = parseFormatDuration(json);
+        StreamInfo video = parseVideoStream(json);
+        StreamInfo audio = parseAudioStream(json);
+
+        int width = video.width;
+        int height = video.height;
+        int rotation = video.rotation;
         if (Math.abs(rotation) == 90 || Math.abs(rotation) == 270) {
             int temp = width;
             width = height;
@@ -110,21 +67,171 @@ public record VideoMetadata(
         if (duration <= 0) {
             throw new IllegalStateException("Could not read video duration from input file.");
         }
-        if (sourceAudioKbps <= 0) {
-            sourceAudioKbps = 128;
-        }
+
+        int sourceAudioKbps = audio.bitrateKbps > 0 ? audio.bitrateKbps : 128;
         return new VideoMetadata(
                 duration,
                 width,
                 height,
-                sourceFps,
-                isHdr,
-                colorTransfer,
-                colorPrimaries,
-                colorSpace,
-                audioChannels,
-                sourceVideoKbps,
+                video.fps > 0 ? video.fps : 30.0,
+                video.isHdr,
+                video.colorTransfer,
+                video.colorPrimaries,
+                video.colorSpace,
+                audio.channels > 0 ? audio.channels : 2,
+                video.bitrateKbps,
                 sourceAudioKbps);
+    }
+
+    private static void logProbeResult(Path input, VideoMetadata meta) {
+        System.out.println(String.format(
+                Locale.US,
+                "[media-compress] Probe %s: %dx%d, %.3fs, %.3ffps, audio %dkbps",
+                input.getFileName(),
+                meta.width(),
+                meta.height(),
+                meta.durationSeconds(),
+                meta.sourceFps(),
+                meta.sourceAudioKbps()));
+    }
+
+    private static double parseFormatDuration(String json) {
+        Matcher matcher = Pattern.compile("\"duration\"\\s*:\\s*\"([^\"]+)\"")
+                .matcher(extractSection(json, "\"format\""));
+        if (matcher.find()) {
+            try {
+                return Double.parseDouble(matcher.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 0;
+    }
+
+    private static StreamInfo parseVideoStream(String json) {
+        String section = findStreamSection(json, "video");
+        StreamInfo info = new StreamInfo();
+        if (section == null) {
+            return info;
+        }
+        info.width = parseIntField(section, "width");
+        info.height = parseIntField(section, "height");
+        info.fps = parseFps(parseStringField(section, "r_frame_rate"));
+        info.bitrateKbps = parseKbps(parseStringField(section, "bit_rate"));
+        info.colorTransfer = parseStringField(section, "color_transfer");
+        info.colorPrimaries = parseStringField(section, "color_primaries");
+        info.colorSpace = parseStringField(section, "color_space");
+        info.isHdr = "smpte2084".equalsIgnoreCase(info.colorTransfer)
+                || "arib-std-b67".equalsIgnoreCase(info.colorTransfer);
+        info.rotation = parseRotation(section);
+        return info;
+    }
+
+    private static StreamInfo parseAudioStream(String json) {
+        String section = findStreamSection(json, "audio");
+        StreamInfo info = new StreamInfo();
+        if (section == null) {
+            return info;
+        }
+        info.channels = parseIntField(section, "channels");
+        info.bitrateKbps = parseKbps(parseStringField(section, "bit_rate"));
+        return info;
+    }
+
+    private static String findStreamSection(String json, String codecType) {
+        int streamsIndex = json.indexOf("\"streams\"");
+        if (streamsIndex < 0) {
+            return null;
+        }
+        int arrayStart = json.indexOf('[', streamsIndex);
+        if (arrayStart < 0) {
+            return null;
+        }
+        int index = arrayStart + 1;
+        while (index < json.length()) {
+            int objectStart = json.indexOf('{', index);
+            if (objectStart < 0) {
+                break;
+            }
+            String objectJson = extractBalancedObject(json, objectStart);
+            if (objectJson != null && objectJson.contains("\"codec_type\": \"" + codecType + "\"")) {
+                return objectJson;
+            }
+            index = objectStart + Math.max(1, objectJson == null ? 1 : objectJson.length());
+        }
+        return null;
+    }
+
+    private static String extractBalancedObject(String json, int start) {
+        int depth = 0;
+        for (int i = start; i < json.length(); i++) {
+            char ch = json.charAt(i);
+            if (ch == '{') {
+                depth++;
+            } else if (ch == '}') {
+                depth--;
+                if (depth == 0) {
+                    return json.substring(start, i + 1);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String extractSection(String json, String key) {
+        int keyIndex = json.indexOf(key);
+        if (keyIndex < 0) {
+            return "";
+        }
+        int start = json.indexOf('{', keyIndex);
+        if (start < 0) {
+            return "";
+        }
+        String section = extractBalancedObject(json, start);
+        return section == null ? "" : section;
+    }
+
+    private static int parseRotation(String streamJson) {
+        int rotation = parseIntField(streamJson, "rotation");
+        if (rotation != 0) {
+            return rotation;
+        }
+        String tagsSection = extractSection(streamJson, "\"tags\"");
+        String rotate = parseStringField(tagsSection, "rotate");
+        if (rotate != null && !rotate.isEmpty()) {
+            try {
+                return (int) Math.round(Double.parseDouble(rotate));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return 0;
+    }
+
+    private static String parseStringField(String json, String field) {
+        if (json == null || json.isEmpty()) {
+            return null;
+        }
+        Matcher matcher = Pattern.compile("\"" + field + "\"\\s*:\\s*\"([^\"]+)\"")
+                .matcher(json);
+        if (matcher.find()) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
+    private static int parseIntField(String json, String field) {
+        String value = parseStringField(json, field);
+        if (value == null || value.isEmpty() || "N/A".equalsIgnoreCase(value)) {
+            Matcher numeric = Pattern.compile("\"" + field + "\"\\s*:\\s*(\\d+)").matcher(json);
+            if (numeric.find()) {
+                return Integer.parseInt(numeric.group(1));
+            }
+            return 0;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private static int parseKbps(String val) {
@@ -140,6 +247,9 @@ public record VideoMetadata(
     }
 
     private static double parseFps(String val) {
+        if (val == null || val.isEmpty()) {
+            return 30.0;
+        }
         try {
             String[] parts = val.split("/");
             if (parts.length == 2) {
@@ -149,5 +259,18 @@ public record VideoMetadata(
         } catch (Exception e) {
             return 30.0;
         }
+    }
+
+    private static final class StreamInfo {
+        int width;
+        int height;
+        double fps;
+        int bitrateKbps;
+        boolean isHdr;
+        String colorTransfer = "unknown";
+        String colorPrimaries = "unknown";
+        String colorSpace = "unknown";
+        int channels;
+        int rotation;
     }
 }

@@ -43,12 +43,7 @@ Files already at or below the target size are reported as not needing compressio
 
 ## ffmpeg
 
-On first use, the app checks:
-
-1. `ffmpeg` on your system `PATH`
-2. Cached copy in `~/.brook-tools/ffmpeg/` (macOS) or `%LOCALAPPDATA%\BrookTools\ffmpeg\` (Windows)
-
-If neither exists, it downloads a static GPL build automatically:
+On first use, the app uses a cached copy in `~/.brook-tools/ffmpeg/` (macOS) or `%LOCALAPPDATA%\BrookTools\ffmpeg\` (Windows). If not present, it downloads a static GPL build automatically (system `PATH` ffmpeg is not used):
 
 - **macOS:** [martin-riedl.de](https://ffmpeg.martin-riedl.de/) static builds
 - **Windows:** [BtbN FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases) (`win64-gpl` / `winarm64-gpl`)

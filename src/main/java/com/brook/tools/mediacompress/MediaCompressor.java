@@ -5,14 +5,20 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 public final class MediaCompressor {
     private static final int MAX_ENCODE_ATTEMPTS = 8;
     private static final int MAX_ENCODE_PROGRESS = 95;
+    private static final long PROCESS_EXIT_TIMEOUT_MS = 5000;
+    private static final int DELETE_RETRY_ATTEMPTS = 12;
+    private static final long DELETE_RETRY_BASE_MS = 50;
 
     public interface ProgressListener {
         void onProgress(int percent, String statusLine);
@@ -57,20 +63,27 @@ public final class MediaCompressor {
     private final Path ffmpeg;
     private final long maxBytes;
     private volatile Process activeProcess;
+    private volatile boolean cancelled;
 
     public MediaCompressor(Path ffmpeg, long maxBytes) {
         this.ffmpeg = ffmpeg;
         this.maxBytes = maxBytes;
     }
 
-    public void cancelActiveEncode() {
+    public void requestCancel() {
+        cancelled = true;
         Process process = activeProcess;
-        if (process != null) {
-            process.destroyForcibly();
+        if (process != null && process.isAlive()) {
+            destroyProcess(process);
         }
     }
 
+    public void cancelActiveEncode() {
+        requestCancel();
+    }
+
     public Result compressVideo(Path input, boolean hdrToSdr, ProgressListener listener) throws Exception {
+        cancelled = false;
         long inputSize = Files.size(input);
         if (inputSize <= maxBytes) {
             throw new IllegalStateException("File is already ≤ " + AppConstants.formatMegabytes(maxBytes) + ".");
@@ -88,10 +101,13 @@ public final class MediaCompressor {
                 AppConstants.formatMegabytes(maxBytes)));
 
         Path output = outputPath(input, "mp4");
+        Path tempOutput = tempOutputPath(input, "mp4");
         Exception lastError = null;
         String lastFormatLabel = null;
 
+        try {
         for (HwEncoderDetector.Encoder encoder : caps.encoders) {
+            ensureNotCancelled();
             if (listener != null) {
                 listener.onEncoderSelected(encoder.codec());
             }
@@ -100,6 +116,7 @@ public final class MediaCompressor {
             EncodePlan plan = null;
 
             for (int attempt = 0; attempt < MAX_ENCODE_ATTEMPTS; attempt++) {
+                ensureNotCancelled();
                 try {
                     plan = CompressionPlanner.plan(
                             plan == null ? meta : plan,
@@ -119,12 +136,12 @@ public final class MediaCompressor {
                 lastFormatLabel = planSummary;
                 logLine(planSummary);
 
-                Files.deleteIfExists(output);
+                deleteOutputArtifacts(output, tempOutput);
                 StringBuilder errorLog = new StringBuilder();
 
                 EncodeAttemptResult attemptResult = runEncodeWithFallbacks(
                         input,
-                        output,
+                        tempOutput,
                         meta,
                         plan,
                         encoder,
@@ -141,12 +158,13 @@ public final class MediaCompressor {
                 if (attemptResult.outcome == EncodeOutcome.FAILED) {
                     lastError = new IOException(
                             "FFmpeg failed with " + encoder.codec() + ".\nReason:\n" + errorLog);
-                    Files.deleteIfExists(output);
+                    deleteOutputArtifacts(output, tempOutput);
                     break;
                 }
 
                 if (attemptResult.outcome == EncodeOutcome.SUCCESS) {
                     long outSize = attemptResult.sizeBytes();
+                    finalizeOutput(tempOutput, output);
                     logEncodeOutcome(attempt, outSize, "accepted");
                     if (listener != null) {
                         listener.onEncodeFinished(attempt, outSize, true);
@@ -168,7 +186,7 @@ public final class MediaCompressor {
                     if (listener != null) {
                         listener.onEncodeFinished(attempt, attemptResult.sizeBytes(), false);
                     }
-                    Files.deleteIfExists(output);
+                    deleteOutputArtifacts(output, tempOutput);
                     continue;
                 }
 
@@ -176,14 +194,20 @@ public final class MediaCompressor {
                 if (listener != null) {
                     listener.onEncodeFinished(attempt, 0, false);
                 }
-                Files.deleteIfExists(output);
+                deleteOutputArtifacts(output, tempOutput);
             }
         }
 
+        deleteOutputArtifacts(output, tempOutput);
         throw new IOException(buildCompressionFailureMessage(meta, lastError));
+        } catch (CancellationException ex) {
+            deleteOutputArtifacts(output, tempOutput);
+            throw ex;
+        }
     }
 
     public Result compressAudio(Path input, ProgressListener listener) throws Exception {
+        cancelled = false;
         long inputSize = Files.size(input);
         if (inputSize <= maxBytes) {
             throw new IllegalStateException("File is already ≤ " + AppConstants.formatMegabytes(maxBytes) + ".");
@@ -191,8 +215,11 @@ public final class MediaCompressor {
 
         int[] bitrates = { 128, 96, 64, 48 };
         Path output = outputPath(input, "m4a");
+        Path tempOutput = tempOutputPath(input, "m4a");
         String lastFormatLabel = null;
+        try {
         for (int kbps : bitrates) {
+            ensureNotCancelled();
             lastFormatLabel = "AAC · " + kbps + "k mono";
             logLine("Audio attempt: " + lastFormatLabel);
             if (listener != null) {
@@ -209,27 +236,33 @@ public final class MediaCompressor {
             args.add("aac");
             args.add("-b:a");
             args.add(kbps + "k");
-            args.add(output.toString());
+            args.add(tempOutput.toString());
 
+            deleteOutputArtifacts(output, tempOutput);
             StringBuilder audioErrorLog = new StringBuilder();
             ProcessResult outcome = runProcess(
                     args,
                     0,
-                    output,
-                    0,
-                    kbps,
+                    tempOutput,
                     listener == null ? null : (p, line) -> listener.onProgress(Math.min(MAX_ENCODE_PROGRESS, p), line),
                     audioErrorLog);
 
             if (outcome.outcome == EncodeOutcome.FAILED) {
+                deleteOutputArtifacts(output, tempOutput);
                 throw new IOException("ffmpeg audio encode failed. Reason:\n" + audioErrorLog);
             }
             if (outcome.outcome == EncodeOutcome.SUCCESS && outcome.sizeBytes <= maxBytes) {
+                finalizeOutput(tempOutput, output);
                 return new Result(output, inputSize, outcome.sizeBytes, "aac", lastFormatLabel);
             }
-            Files.deleteIfExists(output);
+            deleteOutputArtifacts(output, tempOutput);
         }
+        deleteOutputArtifacts(output, tempOutput);
         throw new IOException("unknown error. audio compress failed.");
+        } catch (CancellationException ex) {
+            deleteOutputArtifacts(output, tempOutput);
+            throw ex;
+        }
     }
 
     static String buildPlanSummary(int attempt, VideoMetadata meta, EncodePlan plan) {
@@ -295,11 +328,12 @@ public final class MediaCompressor {
                     meta, plan, encoder, caps, allowHwaccel);
 
             for (VideoFilterGraph.FilterCandidate candidate : candidates) {
+                ensureNotCancelled();
                 if (candidate.pathType() == VideoFilterGraph.PathType.MAC_VT && !allowHwaccel) {
                     continue;
                 }
 
-                Files.deleteIfExists(output);
+                deleteIfExistsQuiet(output);
                 ProcessResult processResult = runEncode(
                         input,
                         output,
@@ -390,7 +424,7 @@ public final class MediaCompressor {
             listener.onEncodeStarted(attempt, planSummary, encoderSummary);
         }
 
-        return runProcess(args, meta.durationSeconds(), output, plan.videoKbps(), plan.audioKbps(), progress, errorLog);
+        return runProcess(args, meta.durationSeconds(), output, progress, errorLog);
     }
 
     private void configureVideoEncoder(
@@ -468,8 +502,6 @@ public final class MediaCompressor {
             List<String> args,
             double durationSec,
             Path outputFile,
-            int videoKbps,
-            int audioKbps,
             BiConsumer<Integer, String> progress,
             StringBuilder errorLog) throws Exception {
         ProcessBuilder pb = new ProcessBuilder(args);
@@ -480,11 +512,14 @@ public final class MediaCompressor {
         String lastFps = null;
         String lastSpeed = null;
         List<String> recentLogLines = new ArrayList<>();
-        Double abortAtTime = null;
 
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                if (cancelled) {
+                    process.destroyForcibly();
+                    break;
+                }
                 recentLogLines.add(line);
                 if (recentLogLines.size() > 15) {
                     recentLogLines.remove(0);
@@ -503,35 +538,28 @@ public final class MediaCompressor {
                     lastSpeed = speed;
                 }
 
-                if (time != null && durationSec > 0) {
-                    if (shouldAbortEncode(outputFile, time, durationSec)) {
-                        abortAtTime = time;
-                        process.destroyForcibly();
-                        break;
-                    }
-                    if (progress != null) {
-                        int percent = (int) Math.min(MAX_ENCODE_PROGRESS, (time / durationSec) * 100);
-                        progress.accept(percent, buildStatus(percent, time, lastFps, lastSpeed));
-                    }
+                if (time != null && durationSec > 0 && progress != null) {
+                    int percent = (int) Math.min(MAX_ENCODE_PROGRESS, (time / durationSec) * 100);
+                    progress.accept(percent, buildStatus(percent, time, lastFps, lastSpeed));
                 }
             }
         } finally {
+            waitForProcessExit(process);
             if (activeProcess == process) {
                 activeProcess = null;
             }
         }
 
-        int code = process.waitFor();
-
-        if (abortAtTime != null) {
-            long projected = projectOutputSize(outputFile, abortAtTime, durationSec);
-            Files.deleteIfExists(outputFile);
-            return new ProcessResult(EncodeOutcome.SIZE_EXCEEDED, projected, false);
+        if (cancelled) {
+            deleteIfExistsQuiet(outputFile);
+            throw new CancellationException("Encoding cancelled.");
         }
+
+        int code = process.exitValue();
 
         if (code != 0) {
             errorLog.append(String.join("\n", recentLogLines));
-            Files.deleteIfExists(outputFile);
+            deleteIfExistsQuiet(outputFile);
             return new ProcessResult(EncodeOutcome.FAILED, 0, false);
         }
 
@@ -541,24 +569,10 @@ public final class MediaCompressor {
 
         long size = Files.size(outputFile);
         if (size > maxBytes) {
-            Files.deleteIfExists(outputFile);
+            deleteIfExistsQuiet(outputFile);
             return new ProcessResult(EncodeOutcome.SIZE_EXCEEDED, size, true);
         }
         return new ProcessResult(EncodeOutcome.SUCCESS, size, true);
-    }
-
-    private boolean shouldAbortEncode(Path outputFile, double timeSec, double durationSec) throws IOException {
-        if (!Files.isRegularFile(outputFile) || timeSec < durationSec * 0.05 || timeSec <= 0) {
-            return false;
-        }
-        return projectOutputSize(outputFile, timeSec, durationSec) > maxBytes;
-    }
-
-    private long projectOutputSize(Path outputFile, double timeSec, double durationSec) throws IOException {
-        if (!Files.isRegularFile(outputFile) || timeSec <= 0) {
-            return 0;
-        }
-        return (long) (Files.size(outputFile) * durationSec / timeSec);
     }
 
     private void addVbrVideoArgs(List<String> args, int videoKbps) {
@@ -607,5 +621,88 @@ public final class MediaCompressor {
         String base = dot > 0 ? name.substring(0, dot) : name;
         Path parent = input.getParent() != null ? input.getParent() : Path.of(".");
         return parent.resolve(base + ".compressed." + ext);
+    }
+
+    private Path tempOutputPath(Path input, String ext) {
+        String name = input.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        Path parent = input.getParent() != null ? input.getParent() : Path.of(".");
+        return parent.resolve(base + ".compressing." + ext);
+    }
+
+    private void finalizeOutput(Path tempOutput, Path output) throws IOException {
+        deleteIfExistsQuiet(output);
+        if (Files.isRegularFile(tempOutput)) {
+            Files.move(tempOutput, output, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private void deleteOutputArtifacts(Path output, Path tempOutput) throws IOException {
+        deleteIfExistsQuiet(tempOutput);
+        deleteIfExistsQuiet(output);
+    }
+
+    private void deleteIfExistsQuiet(Path path) throws IOException {
+        if (path == null || !Files.exists(path)) {
+            return;
+        }
+        int attempts = isWindows() ? DELETE_RETRY_ATTEMPTS : 1;
+        IOException lastError = null;
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            try {
+                Files.deleteIfExists(path);
+                if (!Files.exists(path)) {
+                    return;
+                }
+            } catch (IOException ex) {
+                lastError = ex;
+            }
+            if (attempt + 1 < attempts) {
+                try {
+                    Thread.sleep(DELETE_RETRY_BASE_MS * (attempt + 1));
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while deleting " + path, ex);
+                }
+            }
+        }
+        if (Files.exists(path) && lastError != null) {
+            throw lastError;
+        }
+    }
+
+    private void ensureNotCancelled() throws CancellationException {
+        if (cancelled) {
+            throw new CancellationException("Encoding cancelled.");
+        }
+    }
+
+    private void waitForProcessExit(Process process) throws InterruptedException {
+        if (!process.waitFor(PROCESS_EXIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            destroyProcess(process);
+            process.waitFor(2, TimeUnit.SECONDS);
+        }
+    }
+
+    private void destroyProcess(Process process) {
+        if (process == null || !process.isAlive()) {
+            return;
+        }
+        if (isWindows()) {
+            try {
+                Process killer = new ProcessBuilder(
+                        "taskkill", "/F", "/T", "/PID", Long.toString(process.pid()))
+                        .redirectErrorStream(true)
+                        .start();
+                killer.waitFor(2, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+            }
+        }
+        process.destroyForcibly();
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 }

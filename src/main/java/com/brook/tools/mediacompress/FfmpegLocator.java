@@ -22,13 +22,7 @@ public final class FfmpegLocator {
 
     public synchronized Path resolve(IntConsumer downloadProgress) throws Exception {
         if (cachedFfmpeg != null && Files.isRegularFile(cachedFfmpeg)) {
-            return cachedFfmpeg;
-        }
-
-        Path fromPath = findOnPath();
-        if (fromPath != null) {
-            verifyFfmpeg(fromPath);
-            cachedFfmpeg = fromPath;
+            logResolved(cachedFfmpeg);
             return cachedFfmpeg;
         }
 
@@ -37,35 +31,26 @@ public final class FfmpegLocator {
         if (Files.isRegularFile(cached)) {
             verifyFfmpeg(cached);
             cachedFfmpeg = cached;
+            logResolved(cached);
             return cachedFfmpeg;
         }
 
         Path installed = FfmpegDownloader.downloadAndInstall(cacheDir, downloadProgress);
         verifyFfmpeg(installed);
         cachedFfmpeg = installed;
+        logResolved(installed);
         return installed;
+    }
+
+    private void logResolved(Path ffmpeg) {
+        System.out.println("[media-compress] Using ffmpeg: " + ffmpeg.toAbsolutePath());
     }
 
     private Path defaultCachedBinary(Path cacheDir) {
         if (isWindows()) {
-            return cacheDir.resolve("bin").resolve("ffmpeg.exe");
+            return cacheDir.resolve("ffmpeg.exe");
         }
         return cacheDir.resolve("ffmpeg");
-    }
-
-    private Path findOnPath() {
-        String pathEnv = System.getenv("PATH");
-        if (pathEnv == null || pathEnv.isBlank()) {
-            return null;
-        }
-        String executable = isWindows() ? "ffmpeg.exe" : "ffmpeg";
-        for (String dir : pathEnv.split(java.io.File.pathSeparator)) {
-            Path candidate = Path.of(dir.trim(), executable);
-            if (Files.isRegularFile(candidate)) {
-                return candidate;
-            }
-        }
-        return null;
     }
 
     private void verifyFfmpeg(Path ffmpeg) throws Exception {

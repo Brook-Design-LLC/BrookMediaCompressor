@@ -19,6 +19,7 @@ public final class CompressionPlanner {
     private static final int MAX_VIDEO_KBPS = 10_000;
     private static final int MIN_VIDEO_KBPS = 80;
     private static final int MIN_AUDIO_KBPS = 64;
+    private static final double BPPF_EPSILON = 1e-9;
 
     private CompressionPlanner() {
     }
@@ -106,12 +107,18 @@ public final class CompressionPlanner {
             for (int fps : fpsValuesForPlanning(meta)) {
                 for (double bppf : bppfValues(
                         calculateBppfMax(pixelCount, fps, duration, maxBytes, bppfFloor), bppfFloor)) {
-                    int videoKbps = videoKbpsFromBppf(bppf, pixelCount, fps);
+                    Integer videoKbps = videoKbpsFromBppf(bppf, pixelCount, fps);
+                    if (videoKbps == null) {
+                        continue;
+                    }
                     for (int audioKbps : audioCandidates(meta)) {
                         if (!pastPrevious) {
                             if (matchesCombination(previous, res, fps, videoKbps, audioKbps)) {
                                 pastPrevious = true;
                             }
+                            continue;
+                        }
+                        if (!meetsBppfFloor(videoKbps, dimensions[0], dimensions[1], fps, bppfFloor)) {
                             continue;
                         }
                         if (calculateSize(videoKbps, audioKbps, duration) <= maxBytes) {
@@ -172,14 +179,11 @@ public final class CompressionPlanner {
     private static List<Double> bppfValues(double bppfMax, double bppfFloor) {
         double floor = clampBppfFloor(bppfFloor);
         List<Double> values = new ArrayList<>();
-        if (bppfMax <= 0) {
+        if (bppfMax <= 0 || bppfMax < floor - BPPF_EPSILON) {
             return values;
         }
-        for (double bppf = bppfMax; bppf >= floor - 1e-9; bppf -= BPPF_STRIDE) {
+        for (double bppf = bppfMax; bppf >= floor - BPPF_EPSILON; bppf -= BPPF_STRIDE) {
             values.add(bppf);
-        }
-        if (values.isEmpty()) {
-            values.add(Math.max(bppfMax, floor));
         }
         return values;
     }
@@ -197,9 +201,21 @@ public final class CompressionPlanner {
         return budgetVideoKbps * 1000.0 / (pixelCount * fps);
     }
 
-    private static int videoKbpsFromBppf(double bppf, int pixelCount, int fps) {
-        int kbps = (int) Math.floor(bppf * pixelCount * fps / 1000.0);
-        return clampVideoKbps(kbps);
+    /**
+     * @return video kbps, or null when raw kbps exceeds {@link #MAX_VIDEO_KBPS}
+     */
+    private static Integer videoKbpsFromBppf(double bppf, int pixelCount, int fps) {
+        int rawKbps = (int) Math.floor(bppf * pixelCount * fps / 1000.0);
+        if (rawKbps > MAX_VIDEO_KBPS) {
+            return null;
+        }
+        return clampVideoKbps(rawKbps);
+    }
+
+    private static boolean meetsBppfFloor(
+            int videoKbps, int outputWidth, int outputHeight, int fps, double bppfFloor) {
+        return bitsPerPixelPerFrame(videoKbps, outputWidth, outputHeight, fps)
+                >= clampBppfFloor(bppfFloor) - BPPF_EPSILON;
     }
 
     private static int budgetVideoKbps(double durationSec, int audioKbps, long maxBytes) {
