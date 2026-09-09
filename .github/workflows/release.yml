@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build fat JAR
+        run: |
+          chmod +x gradlew
+          ./gradlew fatJar --no-daemon
+
+      - name: Verify JAR
+        run: |
+          test -f build/libs/brook-media-compress.jar
+          jar tf build/libs/brook-media-compress.jar | grep -q com/brook/tools/mediacompress/Main.class
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: brook-media-compress
+          path: build/libs/brook-media-compress.jar
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/libs/brook-media-compress.jar
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
