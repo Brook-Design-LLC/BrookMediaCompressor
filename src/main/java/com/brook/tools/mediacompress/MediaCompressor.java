@@ -108,6 +108,10 @@ public final class MediaCompressor {
         try {
         for (HwEncoderDetector.Encoder encoder : caps.encoders) {
             ensureNotCancelled();
+            if (meta.isHdr() && !hdrToSdr && !encoder.isHevc()) {
+                logLine("Skipping " + encoder.codec() + " for HDR passthrough.");
+                continue;
+            }
             if (listener != null) {
                 listener.onEncoderSelected(encoder.codec());
             }
@@ -382,7 +386,7 @@ public final class MediaCompressor {
         args.add("-y");
 
         if (allowHwaccel) {
-            addHwaccelArgs(args, encoder, caps, videoFilter);
+            addHwaccelArgs(args, encoder, caps, videoFilter, meta, plan);
         }
 
         args.add("-i");
@@ -391,15 +395,12 @@ public final class MediaCompressor {
         args.add("-vf");
         args.add(videoFilter);
 
-        configureVideoEncoder(args, encoder, plan);
+        configureVideoEncoder(args, encoder, plan, meta);
 
         if (plan.hdrToSdr()) {
-            args.add("-color_primaries");
-            args.add("bt709");
-            args.add("-color_trc");
-            args.add("bt709");
-            args.add("-colorspace");
-            args.add("bt709");
+            addSdrColorMetadata(args);
+        } else if (meta.isHdr()) {
+            addHdrColorMetadata(args, meta);
         }
 
         args.add("-pix_fmt");
@@ -430,9 +431,15 @@ public final class MediaCompressor {
     private void configureVideoEncoder(
             List<String> args,
             HwEncoderDetector.Encoder encoder,
-            EncodePlan plan) {
+            EncodePlan plan,
+            VideoMetadata meta) {
         args.add("-c:v");
         args.add(encoder.codec());
+
+        if (!plan.hdrToSdr() && meta.isHdr() && encoder.isHevc()) {
+            args.add("-profile:v");
+            args.add("main10");
+        }
 
         switch (encoder) {
             case HEVC_VIDEOTOOLBOX, H264_VIDEOTOOLBOX -> addVbrVideoArgs(args, plan.videoKbps());
@@ -475,16 +482,56 @@ public final class MediaCompressor {
             return "nv12";
         }
         if (!plan.hdrToSdr() && meta.isHdr() && encoder.isHevc()) {
+            if (caps.isWindows && (encoder.isNvenc() || encoder.isQsv() || encoder.isAmf())) {
+                return "p010le";
+            }
             return "yuv420p10le";
         }
         return "yuv420p";
+    }
+
+    private static void addSdrColorMetadata(List<String> args) {
+        args.add("-color_primaries");
+        args.add("bt709");
+        args.add("-color_trc");
+        args.add("bt709");
+        args.add("-colorspace");
+        args.add("bt709");
+    }
+
+    private static void addHdrColorMetadata(List<String> args, VideoMetadata meta) {
+        args.add("-color_primaries");
+        args.add(normalizeColorValue(meta.colorPrimaries(), "bt2020"));
+        args.add("-color_trc");
+        args.add(normalizeHdrTransfer(meta));
+        args.add("-colorspace");
+        args.add(normalizeColorValue(meta.colorSpace(), "bt2020nc"));
+    }
+
+    private static String normalizeHdrTransfer(VideoMetadata meta) {
+        if (meta.isHlg()) {
+            return "arib-std-b67";
+        }
+        if (meta.isPq()) {
+            return "smpte2084";
+        }
+        return normalizeColorValue(meta.colorTransfer(), "smpte2084");
+    }
+
+    private static String normalizeColorValue(String value, String fallback) {
+        if (value == null || value.isBlank() || "unknown".equalsIgnoreCase(value)) {
+            return fallback;
+        }
+        return value;
     }
 
     private void addHwaccelArgs(
             List<String> args,
             HwEncoderDetector.Encoder encoder,
             FfmpegCapabilities caps,
-            String videoFilter) {
+            String videoFilter,
+            VideoMetadata meta,
+            EncodePlan plan) {
         if (caps.isMac && encoder.isVideoToolbox()) {
             args.add("-hwaccel");
             args.add("videotoolbox");
@@ -492,7 +539,7 @@ public final class MediaCompressor {
                 args.add("-hwaccel_output_format");
                 args.add("videotoolbox_vld");
             }
-        } else if (caps.isWindows) {
+        } else if (caps.isWindows && !plan.hdrToSdr() && !meta.isHdr()) {
             args.add("-hwaccel");
             args.add("auto");
         }

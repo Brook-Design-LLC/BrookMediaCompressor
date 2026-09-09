@@ -120,8 +120,9 @@ public record VideoMetadata(
         info.colorTransfer = parseStringField(section, "color_transfer");
         info.colorPrimaries = parseStringField(section, "color_primaries");
         info.colorSpace = parseStringField(section, "color_space");
-        info.isHdr = "smpte2084".equalsIgnoreCase(info.colorTransfer)
-                || "arib-std-b67".equalsIgnoreCase(info.colorTransfer);
+        info.pixFmt = parseStringField(section, "pix_fmt");
+        info.bitsPerRawSample = parseIntField(section, "bits_per_raw_sample");
+        info.isHdr = detectHdr(info, section);
         info.rotation = parseRotation(section);
         return info;
     }
@@ -261,6 +262,46 @@ public record VideoMetadata(
         }
     }
 
+    private static boolean detectHdr(StreamInfo info, String section) {
+        if (isHdrTransfer(info.colorTransfer)) {
+            return true;
+        }
+        if (hasDolbyVisionSideData(section)) {
+            return true;
+        }
+        if (isBt2020(info.colorPrimaries) && (info.bitsPerRawSample >= 10 || isHdrPixelFormat(info.pixFmt))) {
+            return true;
+        }
+        return isBt2020(info.colorSpace) && isHdrPixelFormat(info.pixFmt);
+    }
+
+    private static boolean isHdrTransfer(String transfer) {
+        return "smpte2084".equalsIgnoreCase(transfer)
+                || "arib-std-b67".equalsIgnoreCase(transfer);
+    }
+
+    private static boolean isBt2020(String value) {
+        return value != null && value.toLowerCase(Locale.ROOT).contains("bt2020");
+    }
+
+    private static boolean isHdrPixelFormat(String pixFmt) {
+        if (pixFmt == null || pixFmt.isBlank()) {
+            return false;
+        }
+        String fmt = pixFmt.toLowerCase(Locale.ROOT);
+        return fmt.contains("10le") || fmt.contains("p010") || fmt.contains("yuv444p10");
+    }
+
+    private static boolean hasDolbyVisionSideData(String section) {
+        if (section == null || section.isEmpty()) {
+            return false;
+        }
+        return section.contains("DOVI configuration record")
+                || section.contains("Dolby Vision RPU")
+                || section.contains("\"dv_profile\"")
+                || section.contains("dolby_vision");
+    }
+
     private static final class StreamInfo {
         int width;
         int height;
@@ -270,6 +311,8 @@ public record VideoMetadata(
         String colorTransfer = "unknown";
         String colorPrimaries = "unknown";
         String colorSpace = "unknown";
+        String pixFmt;
+        int bitsPerRawSample;
         int channels;
         int rotation;
     }

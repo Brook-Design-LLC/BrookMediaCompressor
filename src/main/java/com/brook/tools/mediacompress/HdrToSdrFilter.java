@@ -7,11 +7,18 @@ final class HdrToSdrFilter {
     static String libplaceboSuffix() {
         return ":format=yuv420p"
                 + ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
-                + ":tonemapping=bt.2390:tonemapping_param=0.3:gamut_mapping=perceptual";
+                + ":tonemapping=bt.2390:tonemapping_param=0.3";
     }
 
-    static String libplaceboSdrSuffix() {
-        return ":format=yuv420p:colorspace=bt709:color_primaries=bt709:color_trc=bt709";
+    static String libplaceboHdrPassthroughSuffix(VideoMetadata meta) {
+        String transfer = meta.isHlg() ? "arib-std-b67" : "smpte2084";
+        return ":format=yuv420p10le"
+                + ":colorspace=bt2020nc:color_primaries=bt2020:color_trc=" + transfer;
+    }
+
+    /** Fallback when zscale+tonemap is unavailable or fails at runtime. */
+    static String cpuTonemapChain() {
+        return "format=yuv420p10le,tonemap=tonemap=hable:desat=0,format=yuv420p";
     }
 
     /** CPU fallback: HLG and PQ use separate transfer curves per ffmpeg zscale/tonemap docs. */

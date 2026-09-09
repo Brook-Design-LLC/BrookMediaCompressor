@@ -58,8 +58,8 @@ final class VideoFilterGraph {
                         filter.toString(),
                         "libplacebo: scale + BT.2390 tonemap (HDR→SDR)",
                         PathType.LIBPLACEBO));
-            } else {
-                filter.append(HdrToSdrFilter.libplaceboSdrSuffix());
+            } else if (meta.isHdr()) {
+                filter.append(HdrToSdrFilter.libplaceboHdrPassthroughSuffix(meta));
                 list.add(new FilterCandidate(
                         filter.toString(),
                         "libplacebo: scale (HDR passthrough)",
@@ -77,7 +77,14 @@ final class VideoFilterGraph {
                     fps + "," + cpuPrefix + ScaleFilter.cpuScale(plan) + "," + HdrToSdrFilter.cpuChain(meta),
                     label,
                     PathType.CPU));
-        } else if (!plan.hdrToSdr() || !macVt || !caps.hasScaleVt) {
+        }
+        if (plan.hdrToSdr() && caps.hasTonemap) {
+            list.add(new FilterCandidate(
+                    fps + "," + cpuPrefix + ScaleFilter.cpuScale(plan) + "," + HdrToSdrFilter.cpuTonemapChain(),
+                    "CPU: tonemap (HDR→SDR)",
+                    PathType.CPU));
+        }
+        if (!plan.hdrToSdr() || !macVt || !caps.hasScaleVt) {
             String pixFmt = meta.isHdr() ? "yuv420p10le" : "yuv420p";
             list.add(new FilterCandidate(
                     fps + "," + cpuPrefix + ScaleFilter.cpuScale(plan) + ",format=" + pixFmt,

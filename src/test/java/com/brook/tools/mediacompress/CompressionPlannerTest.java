@@ -50,6 +50,27 @@ class CompressionPlannerTest {
     }
 
     @Test
+    void parseProbeJsonDetectsDolbyVisionSideData() {
+        String json = """
+                {
+                  "format": { "duration": "8.000000" },
+                  "streams": [
+                    { "codec_type": "video", "width": "3840", "height": "2160",
+                      "r_frame_rate": "24/1", "pix_fmt": "yuv420p10le",
+                      "color_primaries": "bt2020", "color_space": "bt2020nc",
+                      "side_data_list": [
+                        { "side_data_type": "DOVI configuration record", "dv_profile": 8 }
+                      ] },
+                    { "codec_type": "audio", "channels": "2", "bit_rate": "128000" }
+                  ]
+                }
+                """;
+
+        VideoMetadata meta = VideoMetadata.parseProbeJson(json);
+        assertTrue(meta.isHdr());
+    }
+
+    @Test
     void parseProbeJsonUsesFormatDurationOnly() {
         String json = """
                 {
