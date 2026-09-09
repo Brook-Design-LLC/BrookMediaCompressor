@@ -82,7 +82,11 @@ public final class MediaCompressor {
         requestCancel();
     }
 
-    public Result compressVideo(Path input, boolean hdrToSdr, ProgressListener listener) throws Exception {
+    public Result compressVideo(
+            Path input,
+            boolean hdrToSdr,
+            boolean keepAudioQuality,
+            ProgressListener listener) throws Exception {
         cancelled = false;
         long inputSize = Files.size(input);
         if (inputSize <= maxBytes) {
@@ -127,7 +131,8 @@ public final class MediaCompressor {
                             meta,
                             maxBytes,
                             codec,
-                            hdrToSdr);
+                            hdrToSdr,
+                            keepAudioQuality);
                 } catch (NoFeasiblePlanException ex) {
                     logLine("Planner: " + ex.getMessage());
                     break;

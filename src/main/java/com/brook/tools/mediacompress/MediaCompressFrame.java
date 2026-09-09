@@ -61,6 +61,7 @@ public final class MediaCompressFrame extends JFrame {
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final JTextField targetSizeField = new JTextField("10", 4);
     private final JCheckBox hdrToSdrCheckBox = new JCheckBox("Convert HDR to SDR", false);
+    private final JCheckBox keepAudioQualityCheckBox = new JCheckBox("Keep audio quality", false);
     private final JSlider bppfSlider = new JSlider(
             0, CompressionPlanner.bppfSliderMax(), CompressionPlanner.bppfDefaultSliderValue());
     private final JLabel bppfFloorLabel = new JLabel(CompressionPlanner.formatMinBppfLabel());
@@ -280,6 +281,18 @@ public final class MediaCompressFrame extends JFrame {
         hdrToSdrCheckBox.setAlignmentX(Component.LEFT_ALIGNMENT);
         hdrToSdrCheckBox.addActionListener(event -> onPreviewInputsChanged());
 
+        keepAudioQualityCheckBox.setToolTipText(
+                "Use source audio bitrate when planning; video settings may downgrade to fit budget.");
+        keepAudioQualityCheckBox.setMargin(new Insets(0, 0, 0, 0));
+        keepAudioQualityCheckBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+        keepAudioQualityCheckBox.addActionListener(event -> onPreviewInputsChanged());
+
+        JPanel optionCheckboxes = new JPanel();
+        optionCheckboxes.setLayout(new BoxLayout(optionCheckboxes, BoxLayout.X_AXIS));
+        optionCheckboxes.add(hdrToSdrCheckBox);
+        optionCheckboxes.add(Box.createHorizontalStrut(12));
+        optionCheckboxes.add(keepAudioQualityCheckBox);
+
         JPanel targetFields = new JPanel();
         targetFields.setLayout(new BoxLayout(targetFields, BoxLayout.X_AXIS));
         targetFields.add(new JLabel("Media compress target"));
@@ -321,7 +334,7 @@ public final class MediaCompressFrame extends JFrame {
 
         gbc.gridy = 1;
         gbc.insets = new Insets(0, 0, 6, 0);
-        form.add(wrapContent(hdrToSdrCheckBox), gbc);
+        form.add(wrapContent(optionCheckboxes), gbc);
 
         gbc.gridy = 2;
         gbc.insets = new Insets(0, 0, 6, 0);
@@ -390,6 +403,7 @@ public final class MediaCompressFrame extends JFrame {
 
         Path file = selectedFile;
         boolean hdrToSdr = hdrToSdrCheckBox.isSelected();
+        boolean keepAudioQuality = keepAudioQualityCheckBox.isSelected();
 
         previewing = true;
         updateButtonStates();
@@ -426,7 +440,8 @@ public final class MediaCompressFrame extends JFrame {
                         meta,
                         maxBytes,
                         encoder.codecFamily(),
-                        hdrToSdr);
+                        hdrToSdr,
+                        keepAudioQuality);
                 String formatLine = MediaCompressor.buildPlanSummary(0, meta, plan);
                 String hdrLine = MediaCompressor.buildEncoderSummary(
                         encoder.codec(),
@@ -517,6 +532,7 @@ public final class MediaCompressFrame extends JFrame {
         setDropZoneEnabled(false);
         targetSizeField.setEnabled(false);
         hdrToSdrCheckBox.setEnabled(false);
+        keepAudioQualityCheckBox.setEnabled(false);
         bppfSlider.setEnabled(false);
         fpsSlider.setEnabled(false);
         progressBar.setIndeterminate(false);
@@ -610,7 +626,11 @@ public final class MediaCompressFrame extends JFrame {
                     if (isAudio(name)) {
                         result = compressor.compressAudio(file, listener);
                     } else if (isVideo(name)) {
-                        result = compressor.compressVideo(file, hdrToSdrCheckBox.isSelected(), listener);
+                        result = compressor.compressVideo(
+                                file,
+                                hdrToSdrCheckBox.isSelected(),
+                                keepAudioQualityCheckBox.isSelected(),
+                                listener);
                     } else {
                         throw new IllegalArgumentException(
                                 "Unsupported file type. Use an image, video, or audio file.");
@@ -717,6 +737,7 @@ public final class MediaCompressFrame extends JFrame {
         setDropZoneEnabled(true);
         targetSizeField.setEnabled(true);
         hdrToSdrCheckBox.setEnabled(true);
+        keepAudioQualityCheckBox.setEnabled(true);
         bppfSlider.setEnabled(true);
         fpsSlider.setEnabled(true);
         updateButtonStates();

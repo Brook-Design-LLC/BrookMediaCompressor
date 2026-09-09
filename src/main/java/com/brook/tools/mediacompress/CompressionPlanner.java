@@ -8,7 +8,7 @@ import java.util.Locale;
 public final class CompressionPlanner {
     private static final int[] RES_TIERS = { 2160, 1440, 1080, 720, 540, 480, 360 };
     public static final int[] FPS_FALLBACK = { 60, 30, 24, 20, 15, 12, 8 };
-    private static final int[] AUDIO_FALLBACK = { 128, 96, 64 };
+    private static final int[] AUDIO_FALLBACK = { 256, 128, 96, 64 };
     public static final double BPPF_STRIDE = 0.001;
     public static final double BPPF_FLOOR_MIN = BPPF_STRIDE;
     public static final double BPPF_FLOOR_DEFAULT = 0.02;
@@ -85,7 +85,8 @@ public final class CompressionPlanner {
             VideoMetadata meta,
             long maxBytes,
             CodecFamily codec,
-            boolean hdrToSdr) throws NoFeasiblePlanException {
+            boolean hdrToSdr,
+            boolean keepAudioQuality) throws NoFeasiblePlanException {
         if (seed != null && !(seed instanceof VideoMetadata) && !(seed instanceof EncodePlan)) {
             throw new IllegalArgumentException("seed must be VideoMetadata, EncodePlan, or null");
         }
@@ -111,7 +112,7 @@ public final class CompressionPlanner {
                     if (videoKbps == null) {
                         continue;
                     }
-                    for (int audioKbps : audioCandidates(meta)) {
+                    for (int audioKbps : audioCandidates(meta, keepAudioQuality)) {
                         if (!pastPrevious) {
                             if (matchesCombination(previous, res, fps, videoKbps, audioKbps)) {
                                 pastPrevious = true;
@@ -271,8 +272,11 @@ public final class CompressionPlanner {
         return result;
     }
 
-    private static List<Integer> audioCandidates(VideoMetadata meta) {
+    private static List<Integer> audioCandidates(VideoMetadata meta, boolean keepAudioQuality) {
         int origin = meta.sourceAudioKbps() > 0 ? meta.sourceAudioKbps() : 128;
+        if (keepAudioQuality) {
+            return List.of(origin);
+        }
         LinkedHashSet<Integer> ordered = new LinkedHashSet<>();
         ordered.add(origin);
         for (int audio : AUDIO_FALLBACK) {

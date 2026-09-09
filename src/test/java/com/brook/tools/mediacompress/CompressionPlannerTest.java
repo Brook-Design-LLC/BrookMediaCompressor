@@ -21,7 +21,7 @@ class CompressionPlannerTest {
         CompressionPlanner.setFpsSliderValue(0);
         VideoMetadata meta = sample8k(8, 5.0);
         long generousBudget = 50L * 1024 * 1024;
-        EncodePlan plan = CompressionPlanner.plan(meta, meta, generousBudget, CodecFamily.HEVC, false);
+        EncodePlan plan = CompressionPlanner.plan(meta, meta, generousBudget, CodecFamily.HEVC, false, false);
 
         int shortSide = Math.min(plan.outputWidth(), plan.outputHeight());
         assertEquals(4320, shortSide);
@@ -30,7 +30,7 @@ class CompressionPlannerTest {
     @Test
     void doesNotReturnClampedKbpsPlanForImpossible8kBudget() throws Exception {
         VideoMetadata meta = sample8k(60, 30.0);
-        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false);
+        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false, false);
 
         double bppf = CompressionPlanner.bitsPerPixelPerFrame(
                 plan.videoKbps(), plan.outputWidth(), plan.outputHeight(), plan.outFps());
@@ -42,7 +42,7 @@ class CompressionPlannerTest {
     @Test
     void downgradesWhenOriginCannotFitBudget() throws Exception {
         VideoMetadata meta = sample8k(60, 120.0);
-        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false);
+        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false, false);
 
         int shortSide = Math.min(plan.outputWidth(), plan.outputHeight());
         assertTrue(shortSide < 4320);
@@ -92,6 +92,33 @@ class CompressionPlannerTest {
         assertTrue(meta.isHdr());
     }
 
+    @Test
+    void keepAudioQualityUsesSourceBitrate() throws Exception {
+        VideoMetadata meta = sample1080p(30, 60.0, 256);
+        long generousBudget = 50L * 1024 * 1024;
+        EncodePlan plan = CompressionPlanner.plan(meta, meta, generousBudget, CodecFamily.HEVC, false, true);
+
+        assertEquals(256, plan.audioKbps());
+    }
+
+    @Test
+    void keepAudioQualityDoesNotReduceAudioBitrateUnderTightBudget() throws Exception {
+        VideoMetadata meta = sample1080p(30, 120.0, 256);
+        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false, true);
+
+        assertEquals(256, plan.audioKbps());
+        assertTrue(plan.estimatedBytes(meta.durationSeconds()) <= TEN_MB);
+    }
+
+    @Test
+    void allowsAudioFallbackWhenKeepAudioQualityDisabled() throws Exception {
+        VideoMetadata meta = sample1080p(30, 120.0, 256);
+        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false, false);
+
+        assertTrue(plan.audioKbps() < 256);
+        assertTrue(plan.estimatedBytes(meta.durationSeconds()) <= TEN_MB);
+    }
+
     private static VideoMetadata sample8k(int fps, double durationSec) {
         return new VideoMetadata(
                 durationSec,
@@ -105,5 +132,20 @@ class CompressionPlannerTest {
                 2,
                 150_000,
                 128);
+    }
+
+    private static VideoMetadata sample1080p(int fps, double durationSec, int sourceAudioKbps) {
+        return new VideoMetadata(
+                durationSec,
+                1920,
+                1080,
+                fps,
+                false,
+                null,
+                null,
+                null,
+                2,
+                5_000,
+                sourceAudioKbps);
     }
 }

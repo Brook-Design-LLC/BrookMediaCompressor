@@ -31,7 +31,7 @@ class SampleProbeIntegrationTest {
             return;
         }
         VideoMetadata meta = VideoMetadata.probe(ffmpeg, SAMPLE);
-        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false);
+        EncodePlan plan = CompressionPlanner.plan(meta, meta, TEN_MB, CodecFamily.HEVC, false, false);
 
         double bppf = CompressionPlanner.bitsPerPixelPerFrame(
                 plan.videoKbps(), plan.outputWidth(), plan.outputHeight(), plan.outFps());
